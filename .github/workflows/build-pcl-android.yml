@@ -1,0 +1,53 @@
+name: Build PCL Android ARM64 APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout this repository (PCL patch)
+        uses: actions/checkout@v4
+
+      - name: Checkout Fold Craft Launcher source
+        uses: actions/checkout@v4
+        with:
+          repository: FCL-Team/FoldCraftLauncher
+          ref: main
+          path: FCL-source
+
+      - name: Apply PCL overlay
+        run: |
+          unzip -q PCL_Android_Port_0.7.0-dev_source_patch.zip -d "$RUNNER_TEMP/pcl-patch"
+          bash "$RUNNER_TEMP/pcl-patch/PCL_Android_Port_0.6.0-dev/apply.sh" "$GITHUB_WORKSPACE/FCL-source"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: sdkmanager "ndk;27.0.12077973"
+
+      - name: Build ARM64 APK
+        working-directory: FCL-source
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :FCL:assemblePclDev -Darch=arm64 --no-daemon
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PCL-Android-ARM64-APK
+          path: FCL-source/FCL/build/outputs/apk/pclDev/**/*.apk
+          if-no-files-found: error
+          retention-days: 14
