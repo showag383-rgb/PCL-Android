@@ -18,9 +18,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          PATCH_ZIP="$(find "$GITHUB_WORKSPACE" -type f -name 'PCL_Android_Port_0.7.0-dev_source_patch.zip' -print -quit)"
+          PATCH_ZIP="$(find "$GITHUB_WORKSPACE" -type f -name 'PCL_Android_Port_0.7.0-dev_source_patch*.zip' -print -quit)"
           if [[ -z "$PATCH_ZIP" ]]; then
-            echo '::error::Patch ZIP not found. Upload PCL_Android_Port_0.7.0-dev_source_patch.zip to the repository root, then rerun this workflow.'
+            echo '::error::Patch ZIP not found. Upload the PCL_Android_Port_0.7.0-dev_source_patch ZIP to the repository root, then rerun this workflow.'
             echo 'Repository files:'
             find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -print
             exit 1
