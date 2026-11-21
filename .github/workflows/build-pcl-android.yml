@@ -20,8 +20,7 @@ jobs:
           set -euo pipefail
           PATCH_ZIP="$(find "$GITHUB_WORKSPACE" -type f -name 'PCL_Android_Port_0.7.0-dev_source_patch*.zip' -print -quit)"
           if [[ -z "$PATCH_ZIP" ]]; then
-            echo '::error::Patch ZIP not found. Upload the PCL_Android_Port_0.7.0-dev_source_patch ZIP to the repository root, then rerun this workflow.'
-            echo 'Repository files:'
+            echo '::error::Patch ZIP not found. Upload the PCL patch ZIP to the repository root.'
             find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -print
             exit 1
           fi
@@ -46,6 +45,24 @@ jobs:
         shell: bash
         run: bash "$PATCH_DIR/apply.sh" "$GITHUB_WORKSPACE/FCL-source"
 
+      - name: Configure PCL build variant fallback
+        working-directory: FCL-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("FCL/build.gradle.kts")
+          s = p.read_text(encoding="utf-8")
+          needle = 'create("pclDev") {'
+          if needle not in s:
+              raise SystemExit('Could not find create("pclDev") in FCL/build.gradle.kts; no files were changed.')
+          insertion = needle + '\n            matchingFallbacks += listOf("debug", "release")'
+          s = s.replace(needle, insertion, 1)
+          p.write_text(s, encoding="utf-8")
+          print("Added pclDev matchingFallbacks: debug, release")
+          PY
+
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
@@ -56,7 +73,7 @@ jobs:
         uses: android-actions/setup-android@v4
         with:
           packages: platform-tools
-      
+
       - name: Install Android NDK
         run: sdkmanager "ndk;27.0.12077973"
 
