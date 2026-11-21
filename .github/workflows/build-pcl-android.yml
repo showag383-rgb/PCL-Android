@@ -70,18 +70,33 @@ jobs:
           set -euo pipefail
           python3 - <<'PYCODE'
           from pathlib import Path
+          import re
+
           modules = ("ZipFileSystem", "Terracotta")
-          needle = "plugins { alias(libs.plugins.android.library) }"
-          replacement = "plugins {\n    alias(libs.plugins.android.library)\n    alias(libs.plugins.kotlin.android)\n}"
           for module in modules:
               path = Path(module) / "build.gradle.kts"
               source = path.read_text(encoding="utf-8")
+
               if "alias(libs.plugins.kotlin.android)" in source or 'id("org.jetbrains.kotlin.android")' in source:
                   print(f"{module}: Kotlin Android plugin already present")
                   continue
-              if needle not in source:
-                  raise SystemExit(f"Cannot safely patch {path}: expected plugin declaration not found")
-              path.write_text(source.replace(needle, replacement, 1), encoding="utf-8")
+
+              # FCL uses a multiline Kotlin DSL plugins block. Insert immediately
+              # after the Android library alias, regardless of whitespace/layout.
+              pattern = r"(?m)^([ \t]*alias\(libs\.plugins\.android\.library\))[ \t]*$"
+              updated, count = re.subn(
+                  pattern,
+                  r"\1\n    alias(libs.plugins.kotlin.android)",
+                  source,
+                  count=1,
+              )
+              if count != 1:
+                  raise SystemExit(
+                      f"Cannot safely patch {path}: Android library plugin alias not found. "
+                      "No source files were changed for this module."
+                  )
+
+              path.write_text(updated, encoding="utf-8")
               print(f"{module}: added Kotlin Android plugin for androidJvm variant attribute")
           PYCODE
 
