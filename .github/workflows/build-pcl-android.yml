@@ -14,6 +14,27 @@ jobs:
       - name: Checkout this repository (PCL patch)
         uses: actions/checkout@v4
 
+      - name: Locate and extract PCL patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          PATCH_ZIP="$(find "$GITHUB_WORKSPACE" -type f -name 'PCL_Android_Port_0.7.0-dev_source_patch.zip' -print -quit)"
+          if [[ -z "$PATCH_ZIP" ]]; then
+            echo '::error::Patch ZIP not found. Upload PCL_Android_Port_0.7.0-dev_source_patch.zip to the repository root, then rerun this workflow.'
+            echo 'Repository files:'
+            find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -print
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/pcl-patch"
+          unzip -q "$PATCH_ZIP" -d "$RUNNER_TEMP/pcl-patch"
+          PATCH_DIR="$(find "$RUNNER_TEMP/pcl-patch" -mindepth 1 -maxdepth 1 -type d -name 'PCL_Android_Port_*' -print -quit)"
+          if [[ -z "$PATCH_DIR" || ! -f "$PATCH_DIR/apply.sh" ]]; then
+            echo '::error::Patch archive structure is invalid: apply.sh not found.'
+            find "$RUNNER_TEMP/pcl-patch" -maxdepth 4 -type f -print
+            exit 1
+          fi
+          echo "PATCH_DIR=$PATCH_DIR" >> "$GITHUB_ENV"
+
       - name: Checkout Fold Craft Launcher source
         uses: actions/checkout@v4
         with:
@@ -22,9 +43,8 @@ jobs:
           path: FCL-source
 
       - name: Apply PCL overlay
-        run: |
-          unzip -q PCL_Android_Port_0.7.0-dev_source_patch.zip -d "$RUNNER_TEMP/pcl-patch"
-          bash "$RUNNER_TEMP/pcl-patch/PCL_Android_Port_0.6.0-dev/apply.sh" "$GITHUB_WORKSPACE/FCL-source"
+        shell: bash
+        run: bash "$PATCH_DIR/apply.sh" "$GITHUB_WORKSPACE/FCL-source"
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
