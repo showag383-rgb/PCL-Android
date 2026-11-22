@@ -54,13 +54,21 @@ jobs:
           from pathlib import Path
           p = Path("FCL/build.gradle.kts")
           s = p.read_text(encoding="utf-8")
-          needle = 'create("pclDev") {'
-          if needle not in s:
-              raise SystemExit('Could not find create("pclDev") in FCL/build.gradle.kts; no files were changed.')
-          insertion = needle + '\n            matchingFallbacks += listOf("fordebug", "debug", "release")'
-          s = s.replace(needle, insertion, 1)
+          import re
+          block = re.search(r'create\("pclDev"\)\s*\{(.*?)(?=\n\s*\})', s, re.S)
+          if not block:
+              raise SystemExit('Could not find the pclDev build type block in FCL/build.gradle.kts.')
+          body = block.group(1)
+          if 'matchingFallbacks' in body:
+              body = re.sub(r'(?m)^\s*matchingFallbacks\s*\+=.*\n', '', body)
+          init = re.search(r'(?m)^(\s*)initWith\(getByName\("debug"\)\)\s*$', body)
+          if not init:
+              raise SystemExit('Could not find initWith(getByName("debug")) inside pclDev; refusing an unsafe edit.')
+          indent = init.group(1)
+          updated_body = body[:init.end()] + '\n' + indent + 'matchingFallbacks += listOf("fordebug", "debug", "release")' + body[init.end():]
+          s = s[:block.start(1)] + updated_body + s[block.end(1):]
           p.write_text(s, encoding="utf-8")
-          print("Added pclDev matchingFallbacks: fordebug, debug, release")
+          print("Placed pclDev matchingFallbacks AFTER initWith(debug), so initWith cannot overwrite the fallback list.")
           PY
 
       - name: Fix Android library Kotlin variant attributes
@@ -127,3 +135,4 @@ jobs:
           path: FCL-source/FCL/build/outputs/apk/pclDev/**/*.apk
           if-no-files-found: error
           retention-days: 14
+
