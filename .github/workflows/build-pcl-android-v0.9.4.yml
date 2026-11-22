@@ -1,0 +1,228 @@
+name: Build PCL Android ARM64 APK (verified direct download)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout this repository (PCL patch)
+        uses: actions/checkout@v4
+
+      - name: Locate and extract PCL patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          PATCH_ZIP="$(find "$GITHUB_WORKSPACE" -type f -name 'PCL_Android_Port_0.7.0-dev_source_patch*.zip' -print -quit)"
+          if [[ -z "$PATCH_ZIP" ]]; then
+            echo '::error::Patch ZIP not found. Upload the PCL patch ZIP to the repository root.'
+            find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -print
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/pcl-patch"
+          unzip -q "$PATCH_ZIP" -d "$RUNNER_TEMP/pcl-patch"
+          PATCH_DIR="$(find "$RUNNER_TEMP/pcl-patch" -mindepth 1 -maxdepth 1 -type d -name 'PCL_Android_Port_*' -print -quit)"
+          if [[ -z "$PATCH_DIR" || ! -f "$PATCH_DIR/apply.sh" ]]; then
+            echo '::error::Patch archive structure is invalid: apply.sh not found.'
+            find "$RUNNER_TEMP/pcl-patch" -maxdepth 4 -type f -print
+            exit 1
+          fi
+          echo "PATCH_DIR=$PATCH_DIR" >> "$GITHUB_ENV"
+
+      - name: Checkout Fold Craft Launcher source
+        uses: actions/checkout@v4
+        with:
+          repository: FCL-Team/FoldCraftLauncher
+          ref: main
+          path: FCL-source
+
+      - name: Apply PCL overlay
+        shell: bash
+        run: bash "$PATCH_DIR/apply.sh" "$GITHUB_WORKSPACE/FCL-source"
+
+      - name: Configure PCL build variant fallback
+        working-directory: FCL-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("FCL/build.gradle.kts")
+          s = p.read_text(encoding="utf-8")
+          import re
+          block = re.search(r'create\("pclDev"\)\s*\{(.*?)(?=\n\s*\})', s, re.S)
+          if not block:
+              raise SystemExit('Could not find the pclDev build type block in FCL/build.gradle.kts.')
+          body = block.group(1)
+          if 'matchingFallbacks' in body:
+              body = re.sub(r'(?m)^\s*matchingFallbacks\s*\+=.*\n', '', body)
+          init = re.search(r'(?m)^(\s*)initWith\(getByName\("debug"\)\)\s*$', body)
+          if not init:
+              raise SystemExit('Could not find initWith(getByName("debug")) inside pclDev; refusing an unsafe edit.')
+          indent = init.group(1)
+          updated_body = body[:init.end()] + '\n' + indent + 'matchingFallbacks += listOf("fordebug", "debug", "release")' + body[init.end():]
+          s = s[:block.start(1)] + updated_body + s[block.end(1):]
+          p.write_text(s, encoding="utf-8")
+          print("Placed pclDev matchingFallbacks AFTER initWith(debug), so initWith cannot overwrite the fallback list.")
+          PY
+
+      - name: Fix Android library Kotlin variant attributes
+        working-directory: FCL-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import re
+
+          modules = ("ZipFileSystem", "Terracotta")
+          for module in modules:
+              path = Path(module) / "build.gradle.kts"
+              source = path.read_text(encoding="utf-8")
+
+              if "alias(libs.plugins.kotlin.android)" in source or 'id("org.jetbrains.kotlin.android")' in source:
+                  print(f"{module}: Kotlin Android plugin already present")
+                  continue
+
+              # FCL uses a multiline Kotlin DSL plugins block. Insert immediately
+              # after the Android library alias, regardless of whitespace/layout.
+              pattern = r"(?m)^([ \t]*alias\(libs\.plugins\.android\.library\))[ \t]*$"
+              updated, count = re.subn(
+                  pattern,
+                  r"\1\n    alias(libs.plugins.kotlin.android)",
+                  source,
+                  count=1,
+              )
+              if count != 1:
+                  raise SystemExit(
+                      f"Cannot safely patch {path}: Android library plugin alias not found. "
+                      "No source files were changed for this module."
+                  )
+
+              path.write_text(updated, encoding="utf-8")
+              print(f"{module}: added Kotlin Android plugin for androidJvm variant attribute")
+          PYCODE
+
+      - name: Keep bundled XZ runtimes uncompressed in APK
+        working-directory: FCL-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import re
+          p = Path("FCL/build.gradle.kts")
+          s = p.read_text(encoding="utf-8")
+          if re.search(r"androidResources\s*\{[^}]*noCompress\s*\+=\s*\"xz\"", s, re.S):
+              print("XZ assets are already configured as noCompress")
+          else:
+              # Add the Android Gradle Plugin androidResources DSL inside android {}.
+              marker = "    packaging {"
+              if marker not in s:
+                  raise SystemExit("Cannot safely locate packaging {} in FCL/build.gradle.kts")
+              s = s.replace(marker, '    androidResources {\n        noCompress += "xz"\n    }\n' + marker, 1)
+              p.write_text(s, encoding="utf-8")
+              print("Configured .xz runtime assets as uncompressed APK entries")
+          PYCODE
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Install Android NDK
+        run: sdkmanager "ndk;27.0.12077973"
+
+      - name: Build ARM64 APK
+        working-directory: FCL-source
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :FCL:assemblePclDev -Darch=arm64 --no-daemon
+
+      - name: Verify APK integrity and prepare direct download
+        id: verify_apk
+        working-directory: FCL-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find FCL/build/outputs/apk/pclDev -type f -name '*.apk' -print -quit)"
+          if [[ -z "$APK" ]]; then
+            echo '::error::No APK was produced in FCL/build/outputs/apk/pclDev.'
+            find FCL/build/outputs/apk -maxdepth 5 -type f -print 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "APK file: $APK"
+          ls -lh "$APK"
+          file "$APK"
+
+          # Test every APK ZIP entry before inspecting its runtime payloads.
+          unzip -tq "$APK"
+          echo 'APK ZIP integrity: PASS'
+
+          # FCL installs Java from app_runtime/java/*/*.tar.xz inside APK assets.
+          # Validate every bundled XZ stream and ensure it is stored (not deflated)
+          # in the APK, so Android AssetManager does not need a second ZIP inflate
+          # layer before the XZ/TAR extraction performed by RuntimeUtils.installJava.
+          python3 - "$APK" <<'PYCODE'
+          import lzma
+          import sys
+          import zipfile
+
+          apk = sys.argv[1]
+          with zipfile.ZipFile(apk) as zf:
+              entries = [i for i in zf.infolist()
+                         if i.filename.startswith("assets/app_runtime/java/")
+                         and i.filename.endswith(".tar.xz")]
+              if not entries:
+                  raise SystemExit("No bundled Java runtime .tar.xz assets found in APK")
+              for info in entries:
+                  if info.compress_type != zipfile.ZIP_STORED:
+                      raise SystemExit(f"Runtime asset is still ZIP-compressed: {info.filename}")
+                  with zf.open(info, "r") as raw:
+                      with lzma.LZMAFile(raw, "rb") as xz:
+                          while xz.read(8 * 1024 * 1024):
+                              pass
+                  print(f"XZ integrity PASS: {info.filename} ({info.file_size} bytes)")
+          PYCODE
+          echo 'Bundled Java runtime XZ integrity: PASS'
+
+          # Confirm this is an Android package and that it contains the ARM64 ABI directory.
+          unzip -Z1 "$APK" | grep -q '^AndroidManifest.xml$'
+          LIB_ENTRIES="$(unzip -Z1 "$APK" | grep '^lib/' || true)"
+          if [[ -n "$LIB_ENTRIES" ]] && ! grep -q '^lib/arm64-v8a/' <<< "$LIB_ENTRIES"; then
+            echo '::error::APK contains native libraries, but none are for arm64-v8a.'
+            printf '%s\n' "$LIB_ENTRIES"
+            exit 1
+          fi
+          if [[ -z "$LIB_ENTRIES" ]]; then
+            echo 'APK contains no bundled native libraries; ZIP and signature checks will be used.'
+          fi
+
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner -print | sort -V | tail -n 1)"
+          if [[ -z "$APKSIGNER" ]]; then
+            echo '::error::apksigner was not found in Android SDK build-tools.'
+            exit 1
+          fi
+          "$APKSIGNER" verify --verbose "$APK"
+
+          echo "SHA256: $(sha256sum "$APK" | awk '{print $1}')"
+          echo "path=$GITHUB_WORKSPACE/FCL-source/$APK" >> "$GITHUB_OUTPUT"
+
+      - name: Upload verified APK as a direct file
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.verify_apk.outputs.path }}
+          archive: false
+          retention-days: 14
